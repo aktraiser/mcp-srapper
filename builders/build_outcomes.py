@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Builder 3 — OUTCOMES leakage-safe (résolution jour, MVP).
+
+Entrée = 1er close SP500 à une date >= t0 (on agit APRÈS avoir vu l'info, jamais avant).
+Sortie = +k pas de bourse. On N'ÉCRIT QUE les épisodes propres :
+  - t0 dans la fenêtre de la série,
+  - entrée à <= MAXGAP jours d'un vrai point (sinon la série est trop trouée -> rejet).
+Sans cette garde, les épisodes hors couverture produisent des returns bidons
+(bisect clampé au bord) qui polluent tout : P(up) passe de 0.26 (garbage) à ~0.52 (sain).
+
+Limite connue : FRED est daily et clairsemé -> per-stock/intraday = Alpaca (voir README).
+DSN lu depuis l'env EVENTS_DSN. Idempotent (ON CONFLICT DO NOTHING).
+"""
+from __future__ import annotations
+import bisect
+import os
+
+import psycopg2
+from psycopg2.extras import execute_values
+
+DSN = os.environ["EVENTS_DSN"]
+MAXGAP_DAYS = 3
+
+
+def load_series(cur, series_id: str):
+    cur.execute("""SELECT date, value FROM fred_data
+                   WHERE series_id=%s AND value IS NOT NULL ORDER BY date, fetched_at""", (series_id,))
+    seen = {d: float(v) for d, v in cur.fetchall()}
+    ds = sorted(seen)
+    return ds, [seen[d] for d in ds]
+
+
+def main() -> None:
+    conn = psycopg2.connect(DSN, connect_timeout=15)
+    rc, wc = conn.cursor(), conn.cursor()
+    spx_d, spx_v = load_series(rc, "SP500")
+    vix_d, vix_v = load_series(rc, "VIXCLS")
+    oil_d, oil_v = load_series(rc, "DCOILWTICO")
+
+    def fwd(ds, vs, t0, k):
+        d = t0.date()
+        if d < ds[0] or d > ds[-1 - k]:
+            return None, None, None
+        i = bisect.bisect_left(ds, d)
+        if i >= len(ds) or i + k >= len(ds) or abs((ds[i] - d).days) > MAXGAP_DAYS:
+            return None, None, None
+        return ds[i], vs[i], round((vs[i + k] / vs[i] - 1) * 100, 3)
+
+    def chg1(ds, vs, t0):
+        d = t0.date()
+        i = bisect.bisect_left(ds, d)
+        if i >= len(ds) or i + 1 >= len(ds) or abs((ds[i] - d).days) > MAXGAP_DAYS:
+            return None
+        return round(vs[i + 1] - vs[i], 3)
+
+    rc.execute("SELECT id, t0 FROM market_episodes WHERE kind <> 'recurring'")
+    batch, kept = [], 0
+    for eid, t0 in rc.fetchall():
+        entry_date, _, r1 = fwd(spx_d, spx_v, t0, 1)
+        _, _, r3 = fwd(spx_d, spx_v, t0, 3)
+        _, _, r7 = fwd(spx_d, spx_v, t0, 7)
+        if r3 is None:                             # garde de couverture/densité
+            continue
+        batch.append((eid, t0, entry_date, r1, r3, r7,
+                      chg1(vix_d, vix_v, t0), chg1(oil_d, oil_v, t0), 1 if r3 > 0 else 0))
+        kept += 1
+
+    execute_values(wc, """
+        INSERT INTO episode_outcomes
+          (episode_id, t0, entry_date, spx_ret_1d, spx_ret_3d, spx_ret_7d, vix_chg_1d, oil_chg_1d, dir_3d)
+        VALUES %s ON CONFLICT (episode_id) DO NOTHING
+    """, batch, page_size=2000)
+    conn.commit()
+    wc.execute("SELECT round(avg(dir_3d)::numeric,3), round(avg(spx_ret_3d)::numeric,3) FROM episode_outcomes")
+    up, mu = wc.fetchone()
+    print(f"outcomes propres: {kept} | P(up 3j)={up} | moy 3j={mu}%")
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()

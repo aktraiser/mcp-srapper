@@ -48,7 +48,12 @@ def _valid_uuid(v: str) -> str:
     return str(UUID(str(v)))  # lève ValueError si invalide
 
 
-mcp = FastMCP("market-memory")
+# Bind localhost uniquement : Caddy fait la façade TLS + l'auth (bearer/basic).
+mcp = FastMCP(
+    "market-memory",
+    host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
+    port=int(os.getenv("MCP_HTTP_PORT", "8788")),
+)
 
 
 @mcp.tool()

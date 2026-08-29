@@ -14,12 +14,14 @@ DSN lu depuis l'env EVENTS_DSN. Idempotent (ON CONFLICT DO NOTHING).
 from __future__ import annotations
 import bisect
 import os
+from datetime import datetime, time, timezone
 
 import psycopg2
 from psycopg2.extras import execute_values
 
 DSN = os.environ["EVENTS_DSN"]
 MAXGAP_DAYS = 3
+US_CLOSE = time(21, 0)  # ~clôture US en UTC : l'outcome à 3j est connu après ce close
 
 
 def load_series(cur, series_id: str):
@@ -40,11 +42,12 @@ def main() -> None:
     def fwd(ds, vs, t0, k):
         d = t0.date()
         if d < ds[0] or d > ds[-1 - k]:
-            return None, None, None
+            return None, None, None, None
         i = bisect.bisect_left(ds, d)
         if i >= len(ds) or i + k >= len(ds) or abs((ds[i] - d).days) > MAXGAP_DAYS:
-            return None, None, None
-        return ds[i], vs[i], round((vs[i + k] / vs[i] - 1) * 100, 3)
+            return None, None, None, None
+        # exit_date = date du close au k-ième jour de bourse -> dispo de l'outcome
+        return ds[i], vs[i], round((vs[i + k] / vs[i] - 1) * 100, 3), ds[i + k]
 
     def chg1(ds, vs, t0):
         d = t0.date()
@@ -56,18 +59,22 @@ def main() -> None:
     rc.execute("SELECT id, t0 FROM market_episodes WHERE kind <> 'recurring'")
     batch, kept = [], 0
     for eid, t0 in rc.fetchall():
-        entry_date, _, r1 = fwd(spx_d, spx_v, t0, 1)
-        _, _, r3 = fwd(spx_d, spx_v, t0, 3)
-        _, _, r7 = fwd(spx_d, spx_v, t0, 7)
+        entry_date, _, r1, _ = fwd(spx_d, spx_v, t0, 1)
+        _, _, r3, avail3 = fwd(spx_d, spx_v, t0, 3)
+        _, _, r7, _ = fwd(spx_d, spx_v, t0, 7)
         if r3 is None:                             # garde de couverture/densité
             continue
+        # instant où l'outcome à 3j est connu = close du 3e jour de bourse
+        outcome_available_at = datetime.combine(avail3, US_CLOSE, tzinfo=timezone.utc)
         batch.append((eid, t0, entry_date, r1, r3, r7,
-                      chg1(vix_d, vix_v, t0), chg1(oil_d, oil_v, t0), 1 if r3 > 0 else 0))
+                      chg1(vix_d, vix_v, t0), chg1(oil_d, oil_v, t0),
+                      1 if r3 > 0 else 0, outcome_available_at))
         kept += 1
 
     execute_values(wc, """
         INSERT INTO episode_outcomes
-          (episode_id, t0, entry_date, spx_ret_1d, spx_ret_3d, spx_ret_7d, vix_chg_1d, oil_chg_1d, dir_3d)
+          (episode_id, t0, entry_date, spx_ret_1d, spx_ret_3d, spx_ret_7d, vix_chg_1d, oil_chg_1d,
+           dir_3d, outcome_available_at)
         VALUES %s ON CONFLICT (episode_id) DO NOTHING
     """, batch, page_size=2000)
     conn.commit()

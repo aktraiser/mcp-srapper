@@ -106,9 +106,11 @@ def get_episode(episode_id: str) -> dict:
 
 @mcp.tool()
 def find_analogs(episode_id: str, k: int = 46) -> dict:
-    """Analogues PAST-ONLY d'un épisode (cosinus sur l'embedding d'event) + distribution
-    des outcomes réalisés. Leakage-safe : chaque analog a t0 < t0(query), son outcome
-    est donc déjà connu au moment de la requête. Pool = vrais events (n_articles>=3)."""
+    """Analogues d'un épisode (cosinus sur l'embedding d'event) + distribution des
+    outcomes réalisés. LEAKAGE-SAFE : on exige que l'outcome à 3j de l'analogue ait été
+    RÉELLEMENT connu avant la requête (`outcome_available_at < t0(query)`) — pas seulement
+    que l'event soit antérieur. Un embedding de requête NULL est rejeté (pas d'analogues
+    arbitraires). Pool = vrais events (n_articles>=3)."""
     try:
         qid = _valid_uuid(episode_id)
     except ValueError:
@@ -116,22 +118,30 @@ def find_analogs(episode_id: str, k: int = 46) -> dict:
     k = max(1, min(int(k), 100))
     with _db().cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            WITH q AS (
-              SELECT qe.embedding_centroid AS c, me.t0
-              FROM market_episodes me JOIN events qe ON qe.id = me.source_event_id
-              WHERE me.id = %s
-            )
+            SELECT me.t0, (qe.embedding_centroid IS NOT NULL) AS has_emb
+            FROM market_episodes me JOIN events qe ON qe.id = me.source_event_id
+            WHERE me.id = %s""", [qid])
+        q = cur.fetchone()
+        if not q:
+            return {"error": "not_found", "analogs": []}
+        if not q["has_emb"]:
+            return {"error": "query_embedding_missing", "analogs": []}
+        cur.execute("""
             SELECT a.id, a.t0, a.event_type, a.n_articles, a.signature,
                    ao.spx_ret_3d, ao.dir_3d
-            FROM q, market_episodes a
+            FROM market_episodes a
             JOIN events ae ON ae.id = a.source_event_id AND ae.embedding_centroid IS NOT NULL
             JOIN episode_outcomes ao ON ao.episode_id = a.id
-            WHERE a.id <> %s AND a.t0 < q.t0 AND a.n_articles >= 3
-            ORDER BY ae.embedding_centroid <=> q.c
-            LIMIT %s""", [qid, qid, k])
+            WHERE a.id <> %s AND a.n_articles >= 3
+              AND ao.outcome_available_at IS NOT NULL
+              AND ao.outcome_available_at < %s
+            ORDER BY ae.embedding_centroid <=> (
+              SELECT qe.embedding_centroid FROM market_episodes me
+              JOIN events qe ON qe.id = me.source_event_id WHERE me.id = %s)
+            LIMIT %s""", [qid, q["t0"], qid, k])
         rows = [dict(r) for r in cur.fetchall()]
     if not rows:
-        return {"error": "no_analogs_or_no_embedding", "analogs": []}
+        return {"error": "no_leakage_safe_analogs", "analogs": []}
     r3 = sorted(float(r["spx_ret_3d"]) for r in rows if r["spx_ret_3d"] is not None)
     dist = None
     if r3:

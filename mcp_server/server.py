@@ -14,6 +14,7 @@ Outils :
 Lancement : EVENTS_DSN=... python -m mcp_server.server   (transport streamable-http)
 """
 from __future__ import annotations
+import hmac
 import os
 import statistics as st
 from uuid import UUID
@@ -21,6 +22,7 @@ from uuid import UUID
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse, PlainTextResponse
 
 DSN = os.environ["EVENTS_DSN"]
 _conn = None
@@ -155,5 +157,28 @@ def find_analogs(episode_id: str, k: int = 46) -> dict:
     return {"distribution": dist, "analogs": rows}
 
 
+def _wrap(app, token: str):
+    """ASGI wrapper : /healthz public + auth bearer (constant-time) sur le reste.
+    Défense en profondeur : ne dépend pas uniquement de la config Caddy (non versionnée)."""
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "http":
+            if scope.get("path", "") == "/healthz":
+                await JSONResponse({"status": "ok", "server": "market-memory"})(scope, receive, send)
+                return
+            if token:
+                headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+                given = headers.get("authorization", "")
+                if not hmac.compare_digest(given, f"Bearer {token}"):
+                    await PlainTextResponse("unauthorized", status_code=401)(scope, receive, send)
+                    return
+        await app(scope, receive, send)
+    return wrapped
+
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+    host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+    port = int(os.getenv("MCP_HTTP_PORT", "8788"))
+    token = os.getenv("MCP_HTTP_TOKEN", "").strip()
+    app = _wrap(mcp.streamable_http_app(), token)
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -1,0 +1,12 @@
+# À insérer DANS le site `147-93-94-85.nip.io { ... }`, AVANT le catch-all `handle { }`.
+# - chemin non devinable (remplacer <SECRET> ; ne pas committer le vrai chemin) ;
+# - `header_up Host 127.0.0.1:8788` : sinon le SDK MCP rejette le Host nip.io -> 421.
+# L'auth bearer est aussi vérifiée côté serveur (MCP_HTTP_TOKEN) : défense en profondeur.
+
+handle /mm-<SECRET>* {
+    rewrite * /mcp
+    reverse_proxy 127.0.0.1:8788 {
+        flush_interval -1
+        header_up Host 127.0.0.1:8788
+    }
+}

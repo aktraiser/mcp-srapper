@@ -1,0 +1,15 @@
+[Unit]
+Description=Market Memory MCP (Streamable HTTP, read-only, scoped)
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/mcp-srapper
+EnvironmentFile=/root/mcp-srapper/.env
+ExecStart=/root/mcp-srapper/.venv/bin/python -m mcp_server.server
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

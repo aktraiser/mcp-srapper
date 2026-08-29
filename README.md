@@ -37,10 +37,22 @@ python builders/build_outcomes.py       # outcomes daily leakage-safe
 - Le *vrai* signal (intraday, per-stock, IV/options, abnormal cross-sectionnel) nécessite
   **Alpaca** — hors de ce repo.
 
+## Serveur MCP (lecture seule, `mcp_server/`)
+Fail-closed par construction : seuls 3 outils scopés existent, **aucun SQL générique**.
+Session DB forcée en **READ ONLY** (défense en profondeur).
+```bash
+export EVENTS_DSN=postgresql://.../scraping_station
+python -m mcp_server.server            # transport streamable-http
+```
+- `search_episodes(entity, event_type, min_articles, limit)` — lister des épisodes.
+- `get_episode(episode_id)` — épisode + market_state PIT + outcome.
+- `find_analogs(episode_id, k)` — analogues **past-only** (cosinus ivfflat sur l'embedding
+  d'event, `t0(analog) < t0(query)`, pool `n_articles>=3`) + **distribution d'outcomes**
+  (median/p25/p75/prob_up). Validé : ~0,7s, leakage-safe.
+
 ## À venir
-- **MCP scopé** (lecture) : `get_market_episode`, `find_analogs` (pgvector), `get_market_state`
-  — ajoutés à l'allowlist fail-closed du serveur Streamable HTTP.
 - Phase 2 : re-segmentation des sagas (baseline diurne + nouveauté sémantique), embeddings par épisode.
+- `find_analogs` : conditionnement par régime (marché similaire), reranker future-relevance.
 
 ## Sécurité
 - `.env` gitignoré ; aucun secret dans le repo.

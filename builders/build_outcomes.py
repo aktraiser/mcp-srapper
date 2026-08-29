@@ -96,9 +96,12 @@ def main() -> None:
           outcome_available_at = EXCLUDED.outcome_available_at
     """, batch, page_size=2000)
     conn.commit()
-    wc.execute("SELECT round(avg(dir_3d)::numeric,3), round(avg(spx_ret_3d)::numeric,3) FROM episode_outcomes")
-    up, mu = wc.fetchone()
-    print(f"outcomes propres: {kept} | P(up 3j)={up} | moy 3j={mu}%")
+    # Stat sur le sous-ensemble LEAKAGE-SAFE uniquement (outcome_available_at renseigné) :
+    # sinon d'anciennes lignes legacy sans cette colonne polluent la moyenne globale.
+    wc.execute("""SELECT count(*), round(avg(dir_3d)::numeric,3), round(avg(spx_ret_3d)::numeric,3)
+                  FROM episode_outcomes WHERE outcome_available_at IS NOT NULL""")
+    n_safe, up, mu = wc.fetchone()
+    print(f"outcomes propres (ce run): {kept} | leakage-safe en base: {n_safe} | P(up 3j)={up} | moy 3j={mu}%")
     conn.close()
 
 

@@ -36,7 +36,10 @@ def main() -> None:
     btc_t = [r[0] for r in btc]
     btc_v = [float(r[1]) for r in btc]
 
+    # Couverture = intersection réelle des séries pivots (pas une borne 2100 factice) :
+    # au-delà de la dernière donnée, l'état PIT serait extrapolé/stale.
     cov_min = max(ser["SP500"][0][0], ser["VIXCLS"][0][0])
+    cov_max = min(ser["SP500"][0][-1], ser["VIXCLS"][0][-1])
 
     def pit(s: str, d: date):                     # dernière valeur strictement avant la date d
         ds, vs = ser[s]
@@ -52,7 +55,7 @@ def main() -> None:
     batch, ok = [], 0
     for eid, t0 in rc.fetchall():
         d = t0.date()
-        coverage = cov_min <= d <= date(2100, 1, 1)
+        coverage = cov_min <= d <= cov_max
         state: dict = {}
         if coverage:
             for s in SERIES:

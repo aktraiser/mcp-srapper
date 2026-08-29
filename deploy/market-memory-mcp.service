@@ -11,5 +11,15 @@ Restart=on-failure
 RestartSec=3
 User=root
 
+# Durcissement (compatible service root lisant /root + accès DB/HTTP).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
 [Install]
 WantedBy=multi-user.target

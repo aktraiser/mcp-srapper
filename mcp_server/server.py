@@ -50,12 +50,7 @@ def _valid_uuid(v: str) -> str:
     return str(UUID(str(v)))  # lève ValueError si invalide
 
 
-# Bind localhost uniquement : Caddy fait la façade TLS + l'auth (bearer/basic).
-mcp = FastMCP(
-    "market-memory",
-    host=os.getenv("MCP_HTTP_HOST", "127.0.0.1"),
-    port=int(os.getenv("MCP_HTTP_PORT", "8788")),
-)
+mcp = FastMCP("market-memory")
 
 
 @mcp.tool()
@@ -163,7 +158,18 @@ def _wrap(app, token: str):
     async def wrapped(scope, receive, send):
         if scope["type"] == "http":
             if scope.get("path", "") == "/healthz":
-                await JSONResponse({"status": "ok", "server": "market-memory"})(scope, receive, send)
+                # Readiness, pas juste liveness : la DB étant connectée paresseusement,
+                # on vérifie qu'elle répond ET que le rôle a bien le SELECT (sinon 503).
+                try:
+                    with _db().cursor() as cur:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
+                    await JSONResponse({"status": "ok", "server": "market-memory", "db": "ok"})(scope, receive, send)
+                except Exception as e:
+                    await JSONResponse(
+                        {"status": "degraded", "server": "market-memory", "db": type(e).__name__},
+                        status_code=503,
+                    )(scope, receive, send)
                 return
             if token:
                 headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
@@ -176,9 +182,15 @@ def _wrap(app, token: str):
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
-    host = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+    # Bind localhost EN DUR : la façade (TLS + chemin secret) est Caddy ; on ne laisse
+    # pas l'env exposer le service sur 0.0.0.0 et contourner cette frontière.
+    host = "127.0.0.1"
     port = int(os.getenv("MCP_HTTP_PORT", "8788"))
     token = os.getenv("MCP_HTTP_TOKEN", "").strip()
+    # FAIL-CLOSED : pas de token = pas de démarrage (sinon MCP ouvert par défaut).
+    if not token:
+        sys.exit("REFUS: MCP_HTTP_TOKEN vide/absent — le serveur refuse de démarrer sans auth.")
     app = _wrap(mcp.streamable_http_app(), token)
     uvicorn.run(app, host=host, port=port, log_level="info")

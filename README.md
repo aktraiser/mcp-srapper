@@ -18,15 +18,25 @@ sur la rumeur). Ex. earnings Nvidia : `t0` corrigé de +60,9h vers la vraie publ
 ## Schéma (`migrations/001_market_episodes.sql`)
 - `market_episodes` — 1 ligne/event, `t0` = onset, provenance `source_event_id`.
 - `episode_market_state` — sensor **point-in-time strictement avant `t0`** (FRED + crypto), + label régime.
-- `episode_outcomes` — forward returns **leakage-safe** (entrée = 1er close ≥ `t0`).
+- `episode_outcomes` — forward returns **leakage-safe** (entrée = 1er close **strictement
+  après** `t0` : un event post-clôture US entre le lendemain, jamais au close déjà imprimé).
 
-## Builders (`builders/`, DSN via env `EVENTS_DSN`)
+## Migrations & builders (rôle **en écriture**, ≠ `mcp_ro`)
+Les builders **écrivent** et les migrations sont du **DDL** : ils exigent un cred
+propriétaire/écriture — **pas** le rôle `mcp_ro` (read-only) que sert le serveur MCP.
 ```bash
-export EVENTS_DSN=postgresql://.../scraping_station   # jamais commité
+# 1) DDL (hors deploy.sh : nécessite un cred owner, appliqué hors-bande)
+psql "$OWNER_DSN" -f migrations/001_market_episodes.sql
+psql "$OWNER_DSN" -f migrations/002_outcome_available_at.sql   # ajoute la colonne + index
+# 2) Builders (EVENTS_DSN = rôle EN ÉCRITURE ici, jamais commité)
+export EVENTS_DSN=postgresql://.../scraping_station
 python builders/build_episodes.py       # events -> market_episodes (onset/burst)
 python builders/build_market_state.py   # market_state PIT (FRED+crypto)
-python builders/build_outcomes.py       # outcomes daily leakage-safe
+python builders/build_outcomes.py       # outcomes daily leakage-safe (UPSERT: backfille au re-run)
 ```
+> `002` ajoute seulement la colonne `outcome_available_at` (vide). C'est **le re-run de
+> `build_outcomes.py`** (UPSERT) qui la **backfille** sur les lignes préexistantes — sans lui
+> elles restent NULL et `find_analogs` les exclut (fail-safe, mais pool vide).
 
 ## Limites connues (honnêtes)
 - **Donnée marché DB insuffisante** pour valider un *signal* : FRED est **daily et clairsemé**
@@ -47,8 +57,24 @@ python -m mcp_server.server            # transport streamable-http
 - `search_episodes(entity, event_type, min_articles, limit)` — lister des épisodes.
 - `get_episode(episode_id)` — épisode + market_state PIT + outcome.
 - `find_analogs(episode_id, k)` — analogues **past-only** (cosinus ivfflat sur l'embedding
-  d'event, `t0(analog) < t0(query)`, pool `n_articles>=3`) + **distribution d'outcomes**
-  (median/p25/p75/prob_up). Validé : ~0,7s, leakage-safe.
+  d'event, pool `n_articles>=3`) + **distribution d'outcomes** (median/p25/p75/prob_up).
+  Leakage-safe **strict** : on exige `outcome_available_at(analog) < t0(query)` — l'outcome
+  à 3j de l'analogue devait être **réellement connu** avant la requête, pas seulement l'event
+  antérieur. Embedding de requête NULL → rejet explicite (`query_embedding_missing`).
+
+## Déploiement (`deploy/`, reproductible)
+```bash
+bash deploy/deploy.sh    # git pull -> venv -> pip -> systemd -> healthz readiness
+```
+- **Fail-closed** : sans `MCP_HTTP_TOKEN`, le serveur **refuse de démarrer** (pas d'ouverture
+  par défaut) ; `deploy.sh` avorte aussi si le token manque dans `.env`.
+- **Bind `127.0.0.1` en dur** : la façade TLS + chemin secret + Host est **Caddy** ; l'env ne
+  peut pas exposer le service sur `0.0.0.0`.
+- **`/healthz` = readiness** (`SELECT 1`) : renvoie 503 si la DB est injoignable / droits KO
+  (pas juste un « je suis vivant » trompeur).
+- **Caddy** (`deploy/Caddy.snippet`) : setup **manuel one-time** (chemin secret + `header_up
+  Host 127.0.0.1:8788` pour éviter le 421). Hors `deploy.sh` volontairement (édite le
+  Caddyfile global). Endpoint réel = `https://<host>/mm-<SECRET>`, `Authorization: Bearer <token>`.
 
 ## À venir
 - Phase 2 : re-segmentation des sagas (baseline diurne + nouveauté sémantique), embeddings par épisode.
@@ -56,5 +82,9 @@ python -m mcp_server.server            # transport streamable-http
 
 ## Sécurité
 - `.env` gitignoré ; aucun secret dans le repo.
-- ⚠️ Le credential DB historique en clair doit être **rotationné** (action infra).
+- **Auth fail-closed** : bearer constant-time (`hmac.compare_digest`) ; pas de token ⇒ pas de démarrage.
+- Serveur bindé **`127.0.0.1`** (frontière Caddy non contournable par l'env).
+- Rôle DB **`mcp_ro`** (SELECT-only, 7 tables) + session forcée `READ ONLY` — défense en profondeur.
 - Le modèle n'a **jamais** de SQL générique : uniquement des outils de lecture scopés.
+- ⚠️ Le credential DB historique en clair (`scraper`, superuser) doit être **rotationné** (action infra) ;
+  le MCP n'en dépend plus (il tourne en `mcp_ro`).

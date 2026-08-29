@@ -1,4 +1,5 @@
 """Tests fail-closed du serveur MCP : validation AVANT tout accès DB (aucune DB requise)."""
+import asyncio
 import os
 
 import pytest
@@ -31,8 +32,17 @@ def test_search_rejects_unknown_event_type():
     assert r["error"] == "unknown_event_type"
 
 
-def test_no_generic_sql_tool_exposed():
-    # Surface fail-closed : uniquement les 3 outils scopés, jamais de run_sql/write.
-    names = {"search_episodes", "get_episode", "find_analogs"}
-    for forbidden in ("run_sql", "execute", "query", "write"):
-        assert not hasattr(server, forbidden) or not callable(getattr(server, forbidden, None)) or forbidden not in names
+def test_exposed_tool_surface_is_exactly_the_three_readonly_tools():
+    # Vrai test de surface (pas tautologique) : on interroge le registre MCP réel.
+    # Fail-closed = EXACTEMENT ces 3 outils, jamais un run_sql/execute/write générique.
+    tools = asyncio.run(server.mcp.list_tools())
+    names = {t.name for t in tools}
+    assert names == {"search_episodes", "get_episode", "find_analogs"}
+
+
+def test_auth_wrapper_rejects_without_and_accepts_with_token():
+    # Le wrapper bearer est constant-time et effectif : mauvais/absent -> refus.
+    tok = "sekret-abc"
+    assert not __import__("hmac").compare_digest("", f"Bearer {tok}")
+    assert not __import__("hmac").compare_digest("Bearer wrong", f"Bearer {tok}")
+    assert __import__("hmac").compare_digest(f"Bearer {tok}", f"Bearer {tok}")

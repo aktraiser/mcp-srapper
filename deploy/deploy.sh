@@ -26,5 +26,10 @@ for i in $(seq 1 15); do
   if curl -sf "http://127.0.0.1:${PORT}/healthz" >/dev/null; then ok=1; break; fi
   sleep 1
 done
-[ -n "$ok" ] && echo "healthz OK (port ${PORT})" || { echo "healthz KO après 15s"; journalctl -u market-memory-mcp -n 15 --no-pager; exit 1; }
+[ -n "$ok" ] && echo "healthz OK (port ${PORT})" || {
+  echo "healthz KO après 15s — arrêt du service dégradé"
+  journalctl -u market-memory-mcp -n 15 --no-pager
+  systemctl stop market-memory-mcp
+  exit 1
+}
 echo "market-memory-mcp: $(systemctl is-active market-memory-mcp)"

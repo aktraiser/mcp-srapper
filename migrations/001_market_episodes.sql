@@ -1,8 +1,10 @@
--- 001 — Market Memory : épisodes à t0 propre (sans leakage), état de marché PIT, outcomes.
+-- 001 — Schéma de base Market Memory.
+-- Appliquer ensuite 002 et 003 : la représentation PIT immuable est introduite en 003.
 -- Reproduit le schéma créé en live sur scraping_station. Idempotent (IF NOT EXISTS).
 -- gen_random_uuid() = coeur PostgreSQL >= 13 (pas d'extension requise).
 
--- Un MarketEpisode = un événement à un instant t0 = onset du burst d'articles.
+-- Un MarketEpisode = un événement à un instant t0 = onset narratif des articles.
+-- L'instant réellement exploitable (`as_of`) vit dans episode_representations (003).
 -- kind : 'point' (burst net) | 'saga_primary' (multi-burst à splitter) | 'recurring' (bruit).
 CREATE TABLE IF NOT EXISTS market_episodes (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -27,7 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_market_episodes_t0   ON market_episodes (t0);
 CREATE INDEX IF NOT EXISTS idx_market_episodes_kind ON market_episodes (kind);
 CREATE INDEX IF NOT EXISTS idx_market_episodes_type ON market_episodes (event_type);
 
--- État de marché point-in-time STRICTEMENT avant t0 (sensor macro/rates/commodities/crypto).
+-- État de marché. Depuis 003, `decision_at` indique l'instant PIT utilisé par le builder.
 CREATE TABLE IF NOT EXISTS episode_market_state (
   episode_id   uuid PRIMARY KEY REFERENCES market_episodes(id),
   t0           timestamptz,
@@ -38,7 +40,7 @@ CREATE TABLE IF NOT EXISTS episode_market_state (
 );
 CREATE INDEX IF NOT EXISTS idx_episode_market_state_cov ON episode_market_state (coverage_ok);
 
--- Outcomes leakage-safe (entrée = 1er close >= t0). Daily = MVP ; per-stock/intraday = Alpaca.
+-- Outcomes daily. Depuis 003, entrée = premier close XNYS strictement après decision_at.
 CREATE TABLE IF NOT EXISTS episode_outcomes (
   episode_id  uuid PRIMARY KEY REFERENCES market_episodes(id),
   t0          timestamptz,

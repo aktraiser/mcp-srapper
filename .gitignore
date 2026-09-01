@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-builders/
 venv/
 *.log
 .DS_Store

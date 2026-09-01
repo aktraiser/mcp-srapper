@@ -1,1 +1,3 @@
+-r requirements.txt
+-r requirements-builders.txt
 pytest>=8

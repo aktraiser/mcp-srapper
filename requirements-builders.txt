@@ -1,0 +1,4 @@
+# Dépendances des builders offline (non nécessaires au processus MCP runtime).
+psycopg2-binary>=2.9
+# Version figée : le calendrier fait partie de la définition reproductible des labels.
+exchange-calendars==4.13.2

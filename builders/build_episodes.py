@@ -300,7 +300,23 @@ def _dsn() -> str:
     return value
 
 
-def main() -> None:
+def is_buildable(event_id, frozen_events, tainted_events, strict_only: bool) -> bool:
+    """Constructible si pas déjà figé, et — en strict-only — pas tainté legacy.
+    Un event ancien (tainté) ne peut jamais devenir vérifiable, même si un nouvel
+    article s'y rattache : on le saute plutôt que d'en faire une reconstruction morte."""
+    if event_id in frozen_events:
+        return False
+    if strict_only and event_id in tainted_events:
+        return False
+    return True
+
+
+def main(strict_only: bool | None = None) -> None:
+    if strict_only is None:
+        # Défaut opérationnel : strict-only incrémental. Le legacy (161k events taintés,
+        # sans preuve d'assignation) est IGNORÉ — pas transformé en 161k reconstructions
+        # inutiles au retrieval. MARKET_MEMORY_INCLUDE_LEGACY=1 pour l'audit legacy seul.
+        strict_only = os.getenv("MARKET_MEMORY_INCLUDE_LEGACY", "0") != "1"
     conn = psycopg2.connect(_dsn(), connect_timeout=15)
     conn.set_session(isolation_level="REPEATABLE READ")
     read_cur, write_cur = conn.cursor(), conn.cursor()
@@ -325,10 +341,9 @@ def main() -> None:
     read_cur.execute("SELECT event_id FROM legacy_event_taints")
     legacy_tainted_events = {row[0] for row in read_cur.fetchall()}
 
-    grouped: dict[Any, list[ArticleObservation]] = defaultdict(list)
-    read_cur.execute("""
-        WITH memberships AS (
-          -- Intervalles réellement observés depuis la migration 003, ouverts ou clos.
+    # Branche journal (post-003) : intervalles réellement observés, ouverts ou clos.
+    # En strict-only c'est la SEULE source lue -> plus de scan des 438k articles legacy.
+    journaled_sql = """
           SELECT m.event_id, a.id, a.published_at, a.collected_at,
                  a.source_domain, a.title, a.theme,
                  a.analysis->>'type' AS event_hint, a.entities,
@@ -338,11 +353,11 @@ def main() -> None:
           FROM article_event_memberships m
           JOIN articles a ON a.id = m.article_id
           WHERE a.published_at IS NOT NULL AND a.collected_at IS NOT NULL
-
+    """
+    # Branche legacy : appartenance courante sans intervalle prouvé, audit historique
+    # uniquement. Incluse SEULEMENT si MARKET_MEMORY_INCLUDE_LEGACY=1.
+    legacy_sql = """
           UNION ALL
-
-          -- Appartenance courante legacy sans intervalle prouvé : utile seulement pour
-          -- l'audit historique, jamais pour produire un embedding strict.
           SELECT a.event_id, a.id, a.published_at, a.collected_at,
                  a.source_domain, a.title, a.theme,
                  a.analysis->>'type' AS event_hint, a.entities,
@@ -358,22 +373,32 @@ def main() -> None:
               WHERE m.article_id = a.id AND m.event_id = a.event_id
                 AND m.valid_to IS NULL
             )
-        )
+    """
+    grouped: dict[Any, list[ArticleObservation]] = defaultdict(list)
+    read_cur.execute(
+        "WITH memberships AS ("
+        + journaled_sql
+        + ("" if strict_only else legacy_sql)
+        + """)
         SELECT event_id, id, published_at, collected_at, source_domain, title,
                theme, event_hint, entities, relevance_score, source_tier,
                event_assigned_at, membership_valid_to,
                embedding_generated_at, has_embedding
-        FROM memberships
-    """)
+        FROM memberships"""
+    )
+    skipped_tainted: set = set()
     for row in read_cur.fetchall():
         event_id = row[0]
-        if event_id in frozen_events:
+        if not is_buildable(event_id, frozen_events, legacy_tainted_events, strict_only):
+            if strict_only and event_id in legacy_tainted_events:
+                skipped_tainted.add(event_id)
             continue
         grouped[event_id].append(ArticleObservation(*row[1:]))
 
     episode_rows: list[tuple] = []
     representation_rows: list[tuple] = []
     pending = 0
+    skipped_unverified = 0
     for event_id, articles in grouped.items():
         snapshot = freeze_snapshot(
             articles,
@@ -382,6 +407,10 @@ def main() -> None:
         )
         if snapshot is None:
             pending += 1
+            continue
+        if strict_only and snapshot.provenance_status != "verified_feature_timestamps":
+            # Strict-only : jamais de reconstruction historique matérialisée.
+            skipped_unverified += 1
             continue
         t0, kind, multi, peak, burst, span, n, n_domains = onset([
             (article.published_at, article.source_domain or "")
@@ -431,7 +460,11 @@ def main() -> None:
 
     if not episode_rows:
         conn.rollback()
-        print(f"aucun nouvel épisode à figer | fenêtres encore ouvertes: {pending}")
+        print(
+            f"aucun nouvel épisode figé | fenêtres ouvertes: {pending} | "
+            f"legacy ignorés: {len(skipped_tainted)} | reconstructions évitées: {skipped_unverified} | "
+            f"strict_only={strict_only}"
+        )
         conn.close()
         return
 
@@ -534,7 +567,8 @@ def main() -> None:
     total, with_embedding = write_cur.fetchone()
     print(
         f"épisodes figés ce run: {len(episode_rows)} | fenêtres ouvertes: {pending} | "
-        f"représentations en base: {total} | avec embedding: {with_embedding}"
+        f"legacy ignorés: {len(skipped_tainted)} | reconstructions évitées: {skipped_unverified} | "
+        f"représentations en base: {total} | avec embedding: {with_embedding} | strict_only={strict_only}"
     )
     conn.close()
 
